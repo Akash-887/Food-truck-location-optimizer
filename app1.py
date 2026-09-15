@@ -6,14 +6,15 @@ import streamlit as st
 from sklearn.cluster import KMeans
 from folium.plugins import HeatMap
 from streamlit_folium import st_folium
-from geopy.geocoders import Nominatim
+from geopy.geocoders import ArcGIS
+from geopy.exc import GeocoderTimedOut, GeocoderUnavailable
 
 st.set_page_config(page_title="Food Truck Hotspot Finder", layout="wide")
 st.title("🚚 Food Truck Location Optimizer")
 
 st.sidebar.header("Configuration Settings")
 
-uploaded_file = st.sidebar.file_uploader("Upload CSV File", type=["csv"],max_upload_size=1024)
+uploaded_file = st.sidebar.file_uploader("Upload CSV File", type=["csv"], max_upload_size=1024)
 num_clusters = st.sidebar.slider("Number of Food Truck Hubs", min_value=1, max_value=10, value=3)
 top_n = st.sidebar.slider("Top Locations to Analyze", min_value=5, max_value=50, value=20)
 
@@ -29,23 +30,37 @@ def load_large_csv(file) -> pd.DataFrame:
     df_chunk.columns = df_chunk.columns.str.lower()
     return df_chunk
 
+# ==========================================
+# STEP 1: UPDATED GEOCODING FUNCTION (ArcGIS)
+# ==========================================
 @st.cache_data
 def geocode_locations(locations: tuple) -> tuple:
-    geolocator = Nominatim(user_agent="food_truck_app_v2", timeout=5)
+    # ArcGIS is cloud-friendly and does not require API keys or get blocked on Streamlit Cloud
+    geolocator = ArcGIS(timeout=10)
     lats, lons = [], []
+    
     for loc in locations:
-        try:
-            loc_data = geolocator.geocode(f"{loc}, Bangalore, India")
-            if loc_data:
-                lats.append(loc_data.latitude)
-                lons.append(loc_data.longitude)
-            else:
-                lats.append(None)
-                lons.append(None)
-            time.sleep(1)
-        except Exception:
+        full_address = f"{loc}, Bangalore, India"
+        coords = None
+        
+        # Retry up to 2 times in case of network fluctuations
+        for attempt in range(2):
+            try:
+                coords = geolocator.geocode(full_address)
+                if coords:
+                    break
+            except (GeocoderTimedOut, GeocoderUnavailable):
+                time.sleep(1)
+            except Exception:
+                break
+        
+        if coords:
+            lats.append(coords.latitude)
+            lons.append(coords.longitude)
+        else:
             lats.append(None)
             lons.append(None)
+            
     return lats, lons
 
 if uploaded_file is not None:
@@ -64,10 +79,14 @@ if uploaded_file is not None:
             loc_tuple = tuple(top_locations['location'].tolist())
             top_locations['latitude'], top_locations['longitude'] = geocode_locations(loc_tuple)
 
+        # ==========================================
+        # STEP 2: SAFE NULL-HANDLING FOR LOCATIONS
+        # ==========================================
+        # Drop locations where coordinates could not be retrieved
         top_locations.dropna(subset=['latitude', 'longitude'], inplace=True)
 
         if top_locations.empty:
-            st.error("Could not geocode any locations. Check network connection or input locations.")
+            st.error("Could not geocode any locations. Please check network connection or input locations.")
             st.stop()
 
         demand_data = df.groupby('location').agg({'votes': 'sum', 'cleaned_rate': 'mean'}).reset_index()
